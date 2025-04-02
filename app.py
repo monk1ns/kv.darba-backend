@@ -69,7 +69,11 @@ def token_required(f):
 @token_required
 def logout(current_user):
     try:
-        # Ожидаем, что токен будет удален на клиенте, так что сервер ничего не делает с базой данных
+        # Удаляем токен из базы данных
+        employees_collection.update_one(
+            {"_id": ObjectId(current_user["_id"])},
+            {"$unset": {"token": ""}}
+        )
         return jsonify({"success": True, "message": "Logout successful"}), 200
     except Exception as e:
         return jsonify({"error": "Failed to log out", "details": str(e)}), 500
@@ -247,5 +251,164 @@ def get_order_by_id(current_user, order_id):
         return jsonify({"error": "Failed to fetch order", "details": str(e)}), 500
 
 
+
+@app.route("/employees", methods=["GET"])
+@token_required
+def get_employees(current_user):
+    try:
+        employees = list(employees_collection.find())
+        for employee in employees:
+            employee["_id"] = str(employee["_id"])  # Преобразуем ObjectId в строку
+        return app.response_class(dumps(employees), content_type="application/json"), 200
+    except Exception as e:
+        logging.error(f"Error fetching employees: {str(e)}")
+        return jsonify({"error": "Failed to fetch employees", "details": str(e)}), 500
+
+# Маршрут для добавления нового сотрудника
+@app.route("/employees", methods=["POST"])
+@token_required
+def add_employee(current_user):
+    try:
+        data = request.get_json()
+
+        # Проверка обязательных полей
+        if not data.get("vards") or not data.get("uzvards") or not data.get("amats"):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        new_employee = {
+            "vards": data.get("vards"),
+            "uzvards": data.get("uzvards"),
+            "amats": data.get("amats"),
+            "kods": data.get("kods", ""), 
+            "status": data.get("status", "Strādā") 
+        }
+
+        result = employees_collection.insert_one(new_employee)
+        return jsonify({"success": True, "employee_id": str(result.inserted_id)}), 201
+    except Exception as e:
+        logging.error(f"Error adding employee: {str(e)}")
+        return jsonify({"error": "Failed to add employee", "details": str(e)}), 500
+
+@app.route("/employees/<employee_id>", methods=["PUT"])
+@token_required
+def update_employee(current_user, employee_id):
+    try:
+        obj_id = ObjectId(employee_id)
+        data = request.get_json()
+
+        if not data.get("vards") or not data.get("uzvards") or not data.get("amats"):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        update_data = {
+            "vards": data.get("vards"),
+            "uzvards": data.get("uzvards"),
+            "amats": data.get("amats"),
+            "kods": data.get("kods", ""),  
+            "status": data.get("status", "Strādā")  
+        }
+
+        result = employees_collection.update_one(
+            {"_id": obj_id},
+            {"$set": update_data}
+        )
+
+        if result.matched_count == 0:
+            return jsonify({"error": "Employee not found"}), 404
+
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        logging.error(f"Error updating employee: {str(e)}")
+        return jsonify({"error": "Failed to update employee", "details": str(e)}), 500
+
+# Маршрут для удаления сотрудника
+@app.route("/employees/<employee_id>", methods=["DELETE"])
+@token_required
+def delete_employee(current_user, employee_id):
+    try:
+        obj_id = ObjectId(employee_id)
+        result = employees_collection.delete_one({"_id": obj_id})
+
+        if result.deleted_count == 0:
+            return jsonify({"error": "Employee not found"}), 404
+
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        logging.error(f"Error deleting employee: {str(e)}")
+        return jsonify({"error": "Failed to delete employee", "details": str(e)}), 500
+
+
+
+@app.route("/materials", methods=["POST"])
+@token_required
+def add_material(current_user):
+    try:
+        data = request.get_json()
+        if not data.get("nosaukums") or not data.get("warehouse_id") or not data.get("daudzums"):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        new_material = {
+            "nosaukums": data.get("nosaukums"),
+            "warehouse_id": data.get("warehouse_id"),
+            "daudzums": data.get("daudzums")
+        }
+        result = materials_collection.insert_one(new_material)
+        return jsonify({"success": True, "material_id": str(result.inserted_id)}), 201
+    except Exception as e:
+        return jsonify({"error": "Failed to add material", "details": str(e)}), 500
+
+@app.route("/materials/<material_id>", methods=["PUT"])
+@token_required
+def update_material(current_user, material_id):
+    try:
+        obj_id = ObjectId(material_id)
+        data = request.get_json()
+
+        if not data.get("nosaukums") or not data.get("warehouse_id") or not data.get("daudzums"):
+            return jsonify({"error": "Missing required fields"}), 400
+
+        update_data = {
+            "nosaukums": data.get("nosaukums"),
+            "warehouse_id": data.get("warehouse_id"),
+            "daudzums": data.get("daudzums")
+        }
+
+        result = materials_collection.update_one(
+            {"_id": obj_id},
+            {"$set": update_data}
+        )
+        if result.matched_count == 0:
+            return jsonify({"error": "Material not found"}), 404
+
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        return jsonify({"error": "Failed to update material", "details": str(e)}), 500
+
+
+@app.route("/materials/<material_id>", methods=["DELETE"])
+@token_required
+def delete_material(current_user, material_id):
+    try:
+        obj_id = ObjectId(material_id)
+        result = materials_collection.delete_one({"_id": obj_id})
+        if result.deleted_count == 0:
+            return jsonify({"error": "Material not found"}), 404
+
+        return jsonify({"success": True}), 200
+    except Exception as e:
+        return jsonify({"error": "Failed to delete material", "details": str(e)}), 500
+
+
+@app.route("/warehouses", methods=["GET"])
+@token_required
+def get_warehouses(current_user):
+    try:
+        warehouses = list(warehouses_collection.find())
+        for warehouse in warehouses:
+            warehouse["_id"] = str(warehouse["_id"])  # Преобразуем ObjectId в строку
+        return app.response_class(dumps(warehouses), content_type="application/json"), 200
+    except Exception as e:
+        print(f"Error fetching warehouses: {str(e)}")
+        return jsonify({"error": "Failed to fetch warehouses", "details": str(e)}), 500
 if __name__ == "__main__":
     app.run(debug=True)
+

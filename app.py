@@ -1,414 +1,461 @@
-import jwt
-import datetime
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from pymongo import MongoClient
-from bson.json_util import dumps
-from bson.objectid import ObjectId
-from flask import Flask, jsonify
-from bson.errors import InvalidId
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.orm import relationship
+import jwt
+import datetime
 from functools import wraps
 import logging
 
-logging.basicConfig(level=logging.DEBUG)
-
+# Flask app setup
 app = Flask(__name__)
-CORS(app)
 
-# Подключение к MongoDB
-client = MongoClient("mongodb://localhost:27017/kvdarbs")
-db = client["kvdarbs"]
-orders_collection = db.orders
-materials_collection = db["materials"]
-warehouses_collection = db["warehouses"]
-employees_collection = db["employees"]
+# CORS setup for frontend on port 3000
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
 
-# Секретный ключ для создания токенов
+# PostgreSQL connection string
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:111@localhost:5432/kvdarbs'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
+# JWT secret key
 SECRET_KEY = "your_secret_key"
 
-# Функция для генерации токенов
+# Logging setup
+logging.basicConfig(level=logging.DEBUG)
+
+# --- Models ---
+
+class Employee(db.Model):
+    __tablename__ = 'employees'
+    id = db.Column(db.Integer, primary_key=True)
+    vards = db.Column(db.String(15))
+    uzvards = db.Column(db.String(15))
+    amats = db.Column(db.String(20))
+    kods = db.Column(db.Integer)
+    status = db.Column(db.String(10))
+    token = db.Column(db.String(512))
+
+    shifts = db.relationship("Shift", backref="employee")
+    orders = db.relationship("Order", backref="employee")
+
+
+class Shift(db.Model):
+    __tablename__ = 'shifts'
+    id = db.Column(db.Integer, primary_key=True)
+    employee_id = db.Column(db.Integer, db.ForeignKey('employees.id'))
+    start_time = db.Column(db.DateTime(timezone=True))
+    end_time = db.Column(db.DateTime(timezone=True))
+    status = db.Column(db.String(20))
+
+
+class Material(db.Model):
+    __tablename__ = 'materials'
+    id = db.Column(db.Integer, primary_key=True)
+    nosaukums = db.Column(db.String(50))
+    noliktava = db.Column(db.String(20))
+    vieta = db.Column(db.String(20))
+    vieniba = db.Column(db.String(20))
+    daudzums = db.Column(db.INTEGER)
+
+    order_links = db.relationship("OrderMaterial", backref="material")
+
+
+class Order(db.Model):
+    __tablename__ = 'orders'
+    id = db.Column(db.Integer, primary_key=True)
+    nosaukums = db.Column(db.String(50))
+    daudzums = db.Column(db.Integer)
+    employee_id = db.Column(db.Integer, db.ForeignKey('employees.id'), nullable=True)
+    status = db.Column(db.String(20), default="Nav sākts")      
+   
+    materials = db.relationship("OrderMaterial", backref="order")
+
+
+
+class OrderMaterial(db.Model):
+    __tablename__ = 'order_materials'
+    order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), primary_key=True)
+    material_id = db.Column(db.Integer, db.ForeignKey('materials.id'), primary_key=True)
+    daudzums = db.Column(db.Integer)
+
+
+# --- Helper functions ---
+
 def generate_token(user_id):
-    expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=1)  # Токен действует 1 час
-    payload = {
-        'user_id': str(user_id),
-        'exp': expiration
-    }
-    token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
-    return token
+    expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+    payload = {'user_id': user_id, 'exp': expiration}
+    return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+
 
 def token_required(f):
     @wraps(f)
     def decorator(*args, **kwargs):
         token = request.headers.get('Authorization')
-        print(f"Received token: {token}")  # Логируем полученный токен
+        if not token or not token.startswith("Bearer "):
+            return jsonify({"error": "Token is missing or incorrect format!"}), 403
 
-        if not token:
-            return jsonify({"error": "Token is missing!"}), 403
-
+        token = token[7:]
         try:
-            if token.startswith("Bearer "):
-                token = token[7:]  # Убираем "Bearer " из начала
-            else:
-                return jsonify({"error": "Token format is incorrect!"}), 403
-
-            decoded_token = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
-            current_user_id = decoded_token['user_id']
-            current_user = employees_collection.find_one({"_id": ObjectId(current_user_id)})
-            if not current_user:
+            decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+            user = Employee.query.get(decoded['user_id'])
+            if not user:
                 return jsonify({"error": "User not found"}), 404
-
         except jwt.ExpiredSignatureError:
-            return jsonify({"error": "Token has expired"}), 401
+            return jsonify({"error": "Token expired"}), 401
         except jwt.InvalidTokenError:
             return jsonify({"error": "Invalid token"}), 403
 
-        return f(current_user, *args, **kwargs)
+        return f(user, *args, **kwargs)
     return decorator
 
-@app.route("/logout", methods=["POST"])
-@token_required
-def logout(current_user):
-    try:
-        # Удаляем токен из базы данных
-        employees_collection.update_one(
-            {"_id": ObjectId(current_user["_id"])},
-            {"$unset": {"token": ""}}
-        )
-        return jsonify({"success": True, "message": "Logout successful"}), 200
-    except Exception as e:
-        return jsonify({"error": "Failed to log out", "details": str(e)}), 500
 
+# --- Routes ---
 
 @app.route("/login", methods=["POST"])
 def login():
     try:
-        # Receive the incoming JSON data from the frontend
         data = request.get_json()
-        kodas = data.get("kods", "").strip()  # Remove any extra spaces
-        print(f"Received kodas from frontend: '{kodas}'")  # Log the received kodas value
+        if not data:
+            return jsonify({"error": "No JSON body received"}), 400
 
-        # Check if the kodas exists in the database
-        user = employees_collection.find_one({"kods": kodas})
-        if user:
-            print(f"User found: {user}")  # Log the user if found
-            # Generate token for the user
-            token = generate_token(user["_id"])
-            
-            # Save the token in the database (optional)
-            employees_collection.update_one({"_id": user["_id"]}, {"$set": {"token": token}})
-            
-            return jsonify({
-                "success": True,
-                "message": "Pieteikšanās veiksmīga",
-                "token": token,
-                "user": {
-                    "vards": user.get("vards", ""),
-                    "uzvards": user.get("uzvards", ""),
-                    "amats": user.get("amats", "")
-                },
-                "redirect": "/adminpanel" if user.get("amats") == "Administrators" else "/home"
-            }), 200
-        else:
-            print(f"User with kodas '{kodas}' not found in the database.")  # Log when user is not found
+        kods = data.get("kods")
+        if not kods:
+            return jsonify({"error": "Kods not provided"}), 400
+
+        user = Employee.query.filter_by(kods=kods).first()
+        if not user:
             return jsonify({"error": "Nepareizs kods"}), 401
+
+        token = generate_token(user.id)
+        user.token = token
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "Pieteikšanās veiksmīga",
+            "token": token,
+            "user": {
+                "id": user.id,
+                "vards": user.vards,
+                "uzvards": user.uzvards,
+                "amats": user.amats
+            },
+            "redirect": "/adminpanel" if user.amats == "Administrators" else "/home"
+        }), 200
+
     except Exception as e:
-        print(f"Error during login: {str(e)}")
-        return jsonify({"error": "Servera kļūda", "details": str(e)}), 500
+        logging.exception("Login error:")
+        return jsonify({"error": "Server error", "details": str(e)}), 500
 
 
-@app.route("/materials/<material_id>", methods=["GET"])
+@app.route("/logout", methods=["POST"])
 @token_required
-def get_material_by_id(current_user, material_id):
-    try:
-        # Проверяем, является ли material_id корректным ObjectId
-        try:
-            obj_id = ObjectId(material_id)
-        except InvalidId:
-            return jsonify({"error": "Invalid ID format"}), 400
-
-        # Ищем материал по _id
-        material = materials_collection.find_one({"_id": obj_id})
-        if not material:
-            return jsonify({"error": "Material not found"}), 404
-
-        # Преобразуем ObjectId в строки
-        material["_id"] = str(material["_id"])
-
-        # Получаем информацию о складе
-        warehouse_id = material.get("warehouse_id")
-        if warehouse_id:
-            try:
-                warehouse = warehouses_collection.find_one({"_id": ObjectId(warehouse_id)})
-                if warehouse:
-                    material["warehouse"] = {
-                        "warehouse_id": str(warehouse["_id"]),
-                        "warehouse_name": warehouse.get("nosaukums", "Nezināms noliktava"),
-                    }
-                else:
-                    material["warehouse"] = {
-                        "warehouse_id": str(warehouse_id),
-                        "warehouse_name": "Nezināms noliktava",
-                    }
-            except InvalidId:
-                material["warehouse"] = {
-                    "warehouse_id": str(warehouse_id),
-                    "warehouse_name": "Nezināms noliktava",
-                }
-        else:
-            material["warehouse"] = {"warehouse_id": None, "warehouse_name": "Nav norādīts"}
-
-        return app.response_class(dumps(material), content_type="application/json"), 200
-
-    except Exception as e:
-        print(f"Error fetching material: {str(e)}")
-        return jsonify({"error": "Failed to fetch material", "details": str(e)}), 500
+def logout(current_user):
+    current_user.token = None
+    db.session.commit()
+    return jsonify({"success": True, "message": "Logout successful"}), 200
 
 
 @app.route("/materials", methods=["GET"])
 @token_required
 def get_materials(current_user):
     try:
-        materials = list(materials_collection.find())  # Получаем все материалы
-        
-        # Преобразуем ObjectId в строки
-        for material in materials:
-            material['_id'] = str(material['_id'])
-            if 'warehouse_id' in material and material['warehouse_id']:
-                material['warehouse_id'] = str(material['warehouse_id'])
-        
-        return app.response_class(dumps(materials), content_type="application/json"), 200
+        materials = Material.query.all()
+        materials_list = [{
+            "id": material.id,
+            "nosaukums": material.nosaukums,
+            "noliktava": material.noliktava,
+            'daudzums': material.daudzums,
+            "vieta": material.vieta,
+            "vieniba": material.vieniba
+        } for material in materials]
+        return jsonify({"success": True, "materials": materials_list}), 200
     except Exception as e:
+        logging.error(f"Error fetching materials: {str(e)}")
         return jsonify({"error": "Failed to fetch materials", "details": str(e)}), 500
+@app.route("/materials/<int:material_id>", methods=["GET"])
+@token_required
+def get_material_by_id(current_user, material_id):
+    try:
+        material = Material.query.get(material_id)
+        if not material:
+            return jsonify({"error": "Materiāls nav atrasts"}), 404
+
+        material_data = {
+            "id": material.id,
+            "nosaukums": material.nosaukums,
+            "noliktava": material.noliktava,
+            "vieta": material.vieta,
+            "daudzums":material.daudzums,
+            "vieniba": material.vieniba,
+        }
+
+        return jsonify(material_data), 200
+
+    except Exception as e:
+        logging.error(f"Kļūda saņemot materiālu pēc ID: {str(e)}")
+        return jsonify({"error": "Kļūda serverī", "details": str(e)}), 500
+
+
 
 
 @app.route("/orders", methods=["GET"])
 @token_required
 def get_orders(current_user):
     try:
-        # Получаем все заказы из базы данных
-        orders = list(orders_collection.find())
-        
-        # Преобразуем ObjectId в строку для каждого заказа
+        orders = Order.query.all()
+        result = []
         for order in orders:
-            order['_id'] = str(order['_id'])  # Преобразуем ObjectId в строку
-            
-            # Преобразуем материалы в строковый ID
-            if 'materials' in order:
-                for material in order['materials']:
-                    material['material_id'] = str(material.get('material_id', ''))
-        
-        return jsonify(orders), 200
+            result.append({
+                "id": order.id,
+                "nosaukums": order.nosaukums,
+                "daudzums": order.daudzums,
+                "status": order.status,
+                "employee": {
+                    "vards": order.employee.vards,
+                    "uzvards": order.employee.uzvards
+                } if order.employee else None
+            })
+        return jsonify(result), 200
     except Exception as e:
-        print(f"Ошибка при получении заказов: {str(e)}")  # Отладочное сообщение
-        return jsonify({"error": "Произошла ошибка при загрузке заказов"}), 500
+        logging.error(f"Kļūda saņemot pasūtījumus: {str(e)}")
+        return jsonify({"error": "Neizdevās iegūt pasūtījumus"}), 500
 
 
-@app.route("/orders/<order_id>", methods=["GET"])
+@app.route("/orders/<int:order_id>", methods=["GET"])
 @token_required
 def get_order_by_id(current_user, order_id):
     try:
-        # Check if the order_id is a valid ObjectId
-        try:
-            obj_id = ObjectId(order_id)
-        except InvalidId:
-            return jsonify({"error": "Invalid ID format"}), 400
-
-        # Find the order by _id
-        order = orders_collection.find_one({"_id": obj_id})
+        # Fetch the order by its ID
+        order = Order.query.get(order_id)
         if not order:
-            return jsonify({"error": "Order not found"}), 404
+            return jsonify({"error": "Pasūtījums nav atrasts"}), 404
+        
+        # Collect materials information associated with the order
+        materials = []
+        for order_material in order.materials:
+            material_data = {
+                "material_name": order_material.material.nosaukums,
+                "quantity": order_material.daudzums,
+                
+            }
+            materials.append(material_data)
+        
+        # Prepare the response with order details
+        response_data = {
+            "id": order.id,
+            "nosaukums": order.nosaukums,
+            "daudzums": order.daudzums,
+            "status": order.status,
+            "employee": {
+                    "id": order.employee.id if order.employee else None,
+                    "vards": order.employee.vards if order.employee else None,
+                    "uzvards": order.employee.uzvards if order.employee else None
+                } if order.employee else None,
 
-        # Convert ObjectId to string
-        order["_id"] = str(order["_id"])
+            "materials": materials
+        }
 
-        # Process materials
-        for material in order.get("materials", []):
-            mat_id = material.get("material_id")
-            if mat_id:
-                try:
-                    material_doc = materials_collection.find_one({"_id": ObjectId(mat_id)})
-                    if material_doc:
-                        material["material_name"] = material_doc.get("nosaukums", "Not provided")
-                    else:
-                        material["material_name"] = "Not found"
-                except InvalidId:
-                    material["material_name"] = "Error retrieving material"
-
-        # Process worker (if applicable)
-        if "darbinieks" in order:
-            worker_id = order["darbinieks"].get("worker_id")
-            if worker_id:
-                worker = employees_collection.find_one({"_id": ObjectId(worker_id)})
-                if worker:
-                    order["darbinieks"]["worker_name"] = f"{worker.get('first_name', 'Unknown')} {worker.get('last_name', 'Unknown')}"
-                else:
-                    order["darbinieks"]["worker_name"] = "Unknown worker"
-
-        return app.response_class(dumps(order), content_type="application/json"), 200
+        return jsonify(response_data), 200
 
     except Exception as e:
-        print(f"Error fetching order: {str(e)}")
-        return jsonify({"error": "Failed to fetch order", "details": str(e)}), 500
+        logging.error(f"Kļūda saņemot pasūtījumu pēc ID: {str(e)}")
+        return jsonify({"error": "Kļūda serverī", "details": str(e)}), 500
 
+@app.route("/orders/<int:order_id>/accept", methods=["PATCH"])
+@token_required
+def accept_order(current_user, order_id):
+    try:
+        order = Order.query.get(order_id)
+        if not order:
+            return jsonify({"error": "Pasūtījums nav atrasts"}), 404
+        if order.status == "Pabeigts":
+            return jsonify({"error": "Pasūtījums jau ir pabeigts"}), 400
+        if order.employee_id is not None:
+            return jsonify({"error": "Pasūtījums jau ir piešķirts darbiniekam"}), 400
 
+        # Проверка и списание материалов
+        for order_material in order.materials:
+            required_qty = order_material.daudzums * order.daudzums
+            material = Material.query.get(order_material.material_id)
+
+            if material.daudzums < required_qty:
+                return jsonify({
+                    "error": f"Nepietiek materiāla: {material.nosaukums}, nepieciešams {required_qty}, ir tikai {material.daudzums}"
+                }), 400
+
+            material.daudzums -= required_qty
+
+        # Привязка сотрудника и обновление статуса
+        order.employee_id = current_user.id
+        order.status = "Pieņemts"
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "Pasūtījums pieņemts un materiāli nomainīti",
+            "order": {
+                "id": order.id,
+                "nosaukums": order.nosaukums,
+                "employee": {"vards": current_user.vards, "uzvards": current_user.uzvards}
+            }
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Error accepting order: {str(e)}")
+        return jsonify({"error": "Kļūda serverī", "details": str(e)}), 500
+
+@app.route('/orders/<int:order_id>/finish', methods=['PATCH'])
+@token_required
+def finish_order(current_user, order_id):
+    try:
+        order = Order.query.get(order_id)
+        if not order:
+            return jsonify({"error": "Pasūtījums nav atrasts"}), 404
+        if order.status == "Pabeigts":
+            return jsonify({"error": "Pasūtījums jau ir pabeigts"}), 400
+        if order.status != "Pieņemts":
+            return jsonify({"error": "Pasūtījums vēl nav pieņemts"}), 400
+        if order.employee_id != current_user.id:
+            return jsonify({"error": "Jūs nevarat pabeigt šo pasūtījumu, jo tas nav piešķirts Jums"}), 403
+        # Изменить статус заказа на "Pabeigts"
+        order.status = "Pabeigts"
+        db.session.commit()
+        return jsonify({
+            "success": True,
+            "message": "Pasūtījums pabeigts",
+            "order": {
+                "id": order.id,
+                "nosaukums": order.nosaukums,
+                "status": order.status,
+                "employee": {"vards": current_user.vards, "uzvards": current_user.uzvards}
+            }
+        }), 200
+    except Exception as e:
+        logging.error(f"Error finishing order: {str(e)}")
+        return jsonify({"error": "Kļūda serverī", "details": str(e)}), 500
 
 @app.route("/employees", methods=["GET"])
 @token_required
 def get_employees(current_user):
     try:
-        employees = list(employees_collection.find())
-        for employee in employees:
-            employee["_id"] = str(employee["_id"])  # Преобразуем ObjectId в строку
-        return app.response_class(dumps(employees), content_type="application/json"), 200
+        employees = Employee.query.all()
+        employees_list = [{
+            "id": employee.id,
+            "vards": employee.vards,
+            "uzvards": employee.uzvards,
+            "amats": employee.amats,
+            "kods": employee.kods,
+            "status": employee.status
+        } for employee in employees]
+        return jsonify({"success": True, "employees": employees_list}), 200
     except Exception as e:
         logging.error(f"Error fetching employees: {str(e)}")
         return jsonify({"error": "Failed to fetch employees", "details": str(e)}), 500
-
-# Маршрут для добавления нового сотрудника
 @app.route("/employees", methods=["POST"])
 @token_required
 def add_employee(current_user):
     try:
         data = request.get_json()
-
-        # Проверка обязательных полей
-        if not data.get("vards") or not data.get("uzvards") or not data.get("amats"):
-            return jsonify({"error": "Missing required fields"}), 400
-
-        new_employee = {
-            "vards": data.get("vards"),
-            "uzvards": data.get("uzvards"),
-            "amats": data.get("amats"),
-            "kods": data.get("kods", ""), 
-            "status": data.get("status", "Strādā") 
-        }
-
-        result = employees_collection.insert_one(new_employee)
-        return jsonify({"success": True, "employee_id": str(result.inserted_id)}), 201
-    except Exception as e:
-        logging.error(f"Error adding employee: {str(e)}")
-        return jsonify({"error": "Failed to add employee", "details": str(e)}), 500
-
-@app.route("/employees/<employee_id>", methods=["PUT"])
-@token_required
-def update_employee(current_user, employee_id):
-    try:
-        obj_id = ObjectId(employee_id)
-        data = request.get_json()
-
-        if not data.get("vards") or not data.get("uzvards") or not data.get("amats"):
-            return jsonify({"error": "Missing required fields"}), 400
-
-        update_data = {
-            "vards": data.get("vards"),
-            "uzvards": data.get("uzvards"),
-            "amats": data.get("amats"),
-            "kods": data.get("kods", ""),  
-            "status": data.get("status", "Strādā")  
-        }
-
-        result = employees_collection.update_one(
-            {"_id": obj_id},
-            {"$set": update_data}
+        new_employee = Employee(
+            vards=data["vards"],
+            uzvards=data["uzvards"],
+            amats=data["amats"],
+            kods=data["kods"],
+            status=data["status"]
         )
-
-        if result.matched_count == 0:
-            return jsonify({"error": "Employee not found"}), 404
-
-        return jsonify({"success": True}), 200
+        db.session.add(new_employee)
+        db.session.commit()
+        return jsonify({"success": True, "message": "Darbinieks pievienots"}), 201
     except Exception as e:
-        logging.error(f"Error updating employee: {str(e)}")
-        return jsonify({"error": "Failed to update employee", "details": str(e)}), 500
-
-# Маршрут для удаления сотрудника
-@app.route("/employees/<employee_id>", methods=["DELETE"])
+        return jsonify({"error": "Failed to add employee", "details": str(e)}), 500
+@app.route("/employees/<int:id>", methods=["PUT"])
 @token_required
-def delete_employee(current_user, employee_id):
+def update_employee(current_user, id):
     try:
-        obj_id = ObjectId(employee_id)
-        result = employees_collection.delete_one({"_id": obj_id})
+        data = request.get_json()
+        employee = Employee.query.get(id)
+        if not employee:
+            return jsonify({"error": "Darbinieks nav atrasts"}), 404
 
-        if result.deleted_count == 0:
-            return jsonify({"error": "Employee not found"}), 404
+        employee.vards = data["vards"]
+        employee.uzvards = data["uzvards"]
+        employee.amats = data["amats"]
+        employee.kods = data["kods"]
+        employee.status = data["status"]
 
-        return jsonify({"success": True}), 200
+        db.session.commit()
+        return jsonify({"success": True, "message": "Darbinieks atjaunināts"}), 200
     except Exception as e:
-        logging.error(f"Error deleting employee: {str(e)}")
+        return jsonify({"error": "Failed to update employee", "details": str(e)}), 500
+@app.route("/employees/<int:id>", methods=["DELETE"])
+@token_required
+def delete_employee(current_user, id):
+    try:
+        employee = Employee.query.get(id)
+        if not employee:
+            return jsonify({"error": "Darbinieks nav atrasts"}), 404
+
+        db.session.delete(employee)
+        db.session.commit()
+        return jsonify({"success": True, "message": "Darbinieks dzēsts"}), 200
+    except Exception as e:
         return jsonify({"error": "Failed to delete employee", "details": str(e)}), 500
 
 
 
 @app.route("/materials", methods=["POST"])
 @token_required
-def add_material(current_user):
+def create_material(current_user):
     try:
         data = request.get_json()
-        if not data.get("nosaukums") or not data.get("warehouse_id") or not data.get("daudzums"):
-            return jsonify({"error": "Missing required fields"}), 400
-
-        new_material = {
-            "nosaukums": data.get("nosaukums"),
-            "warehouse_id": data.get("warehouse_id"),
-            "daudzums": data.get("daudzums")
-        }
-        result = materials_collection.insert_one(new_material)
-        return jsonify({"success": True, "material_id": str(result.inserted_id)}), 201
+        new_material = Material(
+            nosaukums=data['nosaukums'],
+            noliktava=data['noliktava'],
+            vieta=data.get('vieta', ''), 
+            vieniba=data.get('vieniba', ''),
+            daudzums=data['daudzums']
+        )
+        db.session.add(new_material)
+        db.session.commit()
+        return jsonify({"success": True, "message": "Materiāls pievienots"}), 201
     except Exception as e:
-        return jsonify({"error": "Failed to add material", "details": str(e)}), 500
+        logging.error(f"Error creating material: {str(e)}")
+        return jsonify({"error": "Failed to create material", "details": str(e)}), 500
 
-@app.route("/materials/<material_id>", methods=["PUT"])
+@app.route("/materials/<int:material_id>", methods=["PUT"])
 @token_required
 def update_material(current_user, material_id):
     try:
-        obj_id = ObjectId(material_id)
+        material = Material.query.get(material_id)
+        if not material:
+            return jsonify({"error": "Materiāls nav atrasts"}), 404
         data = request.get_json()
-
-        if not data.get("nosaukums") or not data.get("warehouse_id") or not data.get("daudzums"):
-            return jsonify({"error": "Missing required fields"}), 400
-
-        update_data = {
-            "nosaukums": data.get("nosaukums"),
-            "warehouse_id": data.get("warehouse_id"),
-            "daudzums": data.get("daudzums")
-        }
-
-        result = materials_collection.update_one(
-            {"_id": obj_id},
-            {"$set": update_data}
-        )
-        if result.matched_count == 0:
-            return jsonify({"error": "Material not found"}), 404
-
-        return jsonify({"success": True}), 200
+        material.nosaukums = data.get('nosaukums', material.nosaukums)
+        material.noliktava = data.get('noliktava', material.noliktava)
+        material.vieta = data.get('vieta', material.vieta)  # Обновление поля "vieta"
+        material.vieniba = data.get('vieniba', material.vieniba)
+        material.daudzums = data.get('daudzums', material.daudzums)
+        db.session.commit()
+        return jsonify({"success": True, "message": "Materiāls atjaunināts"}), 200
     except Exception as e:
+        logging.error(f"Error updating material: {str(e)}")
         return jsonify({"error": "Failed to update material", "details": str(e)}), 500
 
-
-@app.route("/materials/<material_id>", methods=["DELETE"])
+@app.route("/materials/<int:material_id>", methods=["DELETE"])
 @token_required
 def delete_material(current_user, material_id):
     try:
-        obj_id = ObjectId(material_id)
-        result = materials_collection.delete_one({"_id": obj_id})
-        if result.deleted_count == 0:
-            return jsonify({"error": "Material not found"}), 404
-
-        return jsonify({"success": True}), 200
+        material = Material.query.get(material_id)
+        if not material:
+            return jsonify({"error": "Materiāls nav atrasts"}), 404
+        db.session.delete(material)
+        db.session.commit()
+        return jsonify({"success": True, "message": "Materiāls izdzēsts"}), 200
     except Exception as e:
+        logging.error(f"Error deleting material: {str(e)}")
         return jsonify({"error": "Failed to delete material", "details": str(e)}), 500
-
-
-@app.route("/warehouses", methods=["GET"])
-@token_required
-def get_warehouses(current_user):
-    try:
-        warehouses = list(warehouses_collection.find())
-        for warehouse in warehouses:
-            warehouse["_id"] = str(warehouse["_id"])  # Преобразуем ObjectId в строку
-        return app.response_class(dumps(warehouses), content_type="application/json"), 200
-    except Exception as e:
-        print(f"Error fetching warehouses: {str(e)}")
-        return jsonify({"error": "Failed to fetch warehouses", "details": str(e)}), 500
+# --- Run app ---
 if __name__ == "__main__":
     app.run(debug=True)
-

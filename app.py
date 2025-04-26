@@ -45,8 +45,7 @@ class Shift(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     employee_id = db.Column(db.Integer, db.ForeignKey('employees.id'))
     start_time = db.Column(db.DateTime(timezone=True))
-    end_time = db.Column(db.DateTime(timezone=True))
-    status = db.Column(db.String(20))
+    end_time = db.Column(db.DateTime(timezone=True)) 
 
 
 class Material(db.Model):
@@ -457,5 +456,112 @@ def delete_material(current_user, material_id):
         logging.error(f"Error deleting material: {str(e)}")
         return jsonify({"error": "Failed to delete material", "details": str(e)}), 500
 # --- Run app ---
+
+
+@app.route("/orders", methods=["POST"])
+@token_required
+def create_order(current_user):
+    try:
+        data = request.get_json()
+        new_order = Order(
+            nosaukums=data["nosaukums"],
+            daudzums=data["daudzums"],
+            status=data.get("status", "Nav sākts"),
+            employee_id=data.get("employee_id")
+        )
+        db.session.add(new_order)
+        db.session.commit()
+        return jsonify({"success": True, "message": "Pasūtījums pievienots", "order": {
+            "id": new_order.id,
+            "nosaukums": new_order.nosaukums,
+            "daudzums": new_order.daudzums,
+            "status": new_order.status
+        }}), 201
+    except Exception as e:
+        logging.error(f"Error creating order: {str(e)}")
+        return jsonify({"error": "Failed to create order", "details": str(e)}), 500
+
+
+@app.route("/orders/<int:order_id>", methods=["DELETE"])
+@token_required
+def delete_order(current_user, order_id):
+    try:
+        order = Order.query.get(order_id)
+        if not order:
+            return jsonify({"error": "Pasūtījums nav atrasts"}), 404
+
+        db.session.delete(order)
+        db.session.commit()
+        return jsonify({"success": True, "message": "Pasūtījums izdzēsts"}), 200
+    except Exception as e:
+        logging.error(f"Error deleting order: {str(e)}")
+        return jsonify({"error": "Failed to delete order", "details": str(e)}), 500
+@app.route('/api/shifts/start', methods=['POST'])
+@token_required
+def start_shift(current_user):
+    try:
+        # Проверяем наличие активной смены через end_time
+        active_shift = Shift.query.filter(
+            Shift.employee_id == current_user.id,
+            Shift.end_time.is_(None)  # Активная смена = end_time не установлен
+        ).first()
+
+        if active_shift:
+            return jsonify({"error": "Jums jau ir aktīva maiņa."}), 400
+
+        # Создаем новую смену
+        new_shift = Shift(
+            employee_id=current_user.id,
+            start_time=datetime.datetime.utcnow(),  # Используем текущее время
+            end_time=None  # Явно указываем отсутствие end_time
+        )
+        db.session.add(new_shift)
+        db.session.commit()
+
+        return jsonify({
+            "id": new_shift.id,
+            "message": "Maiņa sākta.",
+            "start_time": new_shift.start_time.isoformat()
+        }), 201
+
+    except Exception as e:
+        logging.error(f"Kļūda sākot maiņu: {str(e)}")
+        return jsonify({"error": "Servera kļūda"}), 500
+
+@app.route('/api/shifts/end/<int:shift_id>', methods=['PUT'])
+@token_required
+def end_shift(current_user, shift_id):
+    try:
+        shift = Shift.query.get(shift_id)
+        if not shift:
+            return jsonify({"error": "Maiņa nav atrasta."}), 404
+
+        if shift.employee_id != current_user.id:
+            return jsonify({"error": "Nav tiesību pabeigt šo maiņu."}), 403
+
+        if shift.end_time is not None:
+            return jsonify({"error": "Maiņa jau ir pabeigta."}), 400
+
+        # Обновляем только end_time
+        shift.end_time = datetime.datetime.utcnow()
+        db.session.commit()
+
+        return jsonify({
+            "message": "Maiņa pabeigta.",
+            "start_time": shift.start_time.isoformat(),
+            "end_time": shift.end_time.isoformat()
+        }), 200
+
+    except Exception as e:
+        logging.error(f"Kļūda beidzot maiņu: {str(e)}")
+        return jsonify({"error": "Servera kļūda"}), 500
+
+@app.route('/materials/search')
+def search_materials():
+    query = request.args.get('q')
+    materials = Material.query.filter(Material.nosaukums.ilike(f'%{query}%')).all()
+    return jsonify([material.to_dict() for material in materials])
+
+    
 if __name__ == "__main__":
     app.run(debug=True)

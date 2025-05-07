@@ -5,13 +5,14 @@ from sqlalchemy.orm import relationship
 import jwt
 import datetime
 from functools import wraps
+import bcrypt
 import logging
 
 # Flask app setup
 app = Flask(__name__)
 
 # CORS setup for frontend on port 3000
-CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": "http://localhost:3001"}}, supports_credentials=True)
 
 # PostgreSQL connection string
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:111@localhost:5432/kvdarbs'
@@ -35,6 +36,7 @@ class Employee(db.Model):
     kods = db.Column(db.Integer)
     status = db.Column(db.String(10))
     token = db.Column(db.String(512))
+    password = db.Column(db.String(200))
 
     shifts = db.relationship("Shift", backref="employee")
     orders = db.relationship("Order", backref="employee")
@@ -110,11 +112,11 @@ def token_required(f):
 
 
 # --- Routes ---
-
 @app.route("/login", methods=["POST"])
 def login():
     try:
         data = request.get_json()
+        print("Received data:", data)  # Логируем входящие данные
         if not data:
             return jsonify({"error": "No JSON body received"}), 400
 
@@ -142,11 +144,53 @@ def login():
             },
             "redirect": "/adminpanel" if user.amats == "Administrators" else "/home"
         }), 200
+    except Exception as e:
+        print("Error during login:", str(e))
+        return jsonify({"error": "Server error"}), 500
+
+@app.route("/login/password", methods=["POST"])
+def login_with_password():
+    try:
+        # Получение данных из запроса
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No JSON body received"}), 400
+
+        kods = data.get("kods")
+        password = data.get("password")
+        
+        if not kods or not password:
+            return jsonify({"error": "Kods or password not provided"}), 400
+
+        # Поиск пользователя по коду
+        user = Employee.query.filter_by(kods=kods).first()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+
+        # Проверка пароля с использованием bcrypt
+        if not bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
+            return jsonify({"error": "Incorrect password"}), 401
+
+        # Генерация токена для пользователя
+        token = generate_token(user.id)
+        user.token = token
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "Login successful",
+            "token": token,
+            "user": {
+                "id": user.id,
+                "vards": user.vards,
+                "uzvards": user.uzvards,
+                "amats": user.amats
+            },
+            "redirect": "/adminpanel" if user.amats == "Administrators" else "/home"
+        }), 200
 
     except Exception as e:
-        logging.exception("Login error:")
         return jsonify({"error": "Server error", "details": str(e)}), 500
-
 
 @app.route("/logout", methods=["POST"])
 @token_required
@@ -458,29 +502,35 @@ def delete_material(current_user, material_id):
 # --- Run app ---
 
 
-@app.route("/orders", methods=["POST"])
-@token_required
-def create_order(current_user):
+@app.route('/orders', methods=['POST'])
+def create_order():
+    data = request.json
     try:
-        data = request.get_json()
-        new_order = Order(
-            nosaukums=data["nosaukums"],
-            daudzums=data["daudzums"],
-            status=data.get("status", "Nav sākts"),
-            employee_id=data.get("employee_id")
+        order = Order(
+            nosaukums=data['nosaukums'],
+            daudzums=data['daudzums'],
+            status=data.get('status', 'Nav sākts')
         )
-        db.session.add(new_order)
+        db.session.add(order)
+        
+        for material in data['materials']:
+            db_material = Material.query.get(material['material_id'])
+            if db_material.daudzums < material['quantity']:
+                return jsonify({'error': f'Недостаточно {db_material.nosaukums}'}), 400
+                
+            order_material = OrderMaterial(
+                order_id=order.id,
+                material_id=material['material_id'],
+                quantity=material['quantity']
+            )
+            db.session.add(order_material)
+            db_material.daudzums -= material['quantity']
+        
         db.session.commit()
-        return jsonify({"success": True, "message": "Pasūtījums pievienots", "order": {
-            "id": new_order.id,
-            "nosaukums": new_order.nosaukums,
-            "daudzums": new_order.daudzums,
-            "status": new_order.status
-        }}), 201
+        return jsonify(order.to_dict()), 201
     except Exception as e:
-        logging.error(f"Error creating order: {str(e)}")
-        return jsonify({"error": "Failed to create order", "details": str(e)}), 500
-
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
 @app.route("/orders/<int:order_id>", methods=["DELETE"])
 @token_required
@@ -558,10 +608,29 @@ def end_shift(current_user, shift_id):
 
 @app.route('/materials/search')
 def search_materials():
-    query = request.args.get('q')
-    materials = Material.query.filter(Material.nosaukums.ilike(f'%{query}%')).all()
-    return jsonify([material.to_dict() for material in materials])
+    search_term = request.args.get('q', '')
+    materials = Material.query.filter(
+        Material.nosaukums.ilike(f'%{search_term}%')
+    ).limit(10).all()
+    return jsonify([m.to_dict() for m in materials])
 
+@app.route('/orders/<int:order_id>/materials')
+def get_order_materials(order_id):
+    materials = db.session.query(
+        Material.nosaukums,
+        OrderMaterial.quantity,
+        Material.vieniba
+    ).join(OrderMaterial).filter(
+        OrderMaterial.order_id == order_id
+    ).all()
+    
+    result = [{
+        'nosaukums': m.nosaukums,
+        'daudzums': m.quantity,
+        'vieniba': m.vieniba
+    } for m in materials]
+    
+    return jsonify(result)
     
 if __name__ == "__main__":
     app.run(debug=True)

@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import relationship
+from sqlalchemy.orm import joinedload
 import jwt
 import datetime
 from functools import wraps
@@ -41,6 +42,17 @@ class Employee(db.Model):
     shifts = db.relationship("Shift", backref="employee")
     orders = db.relationship("Order", backref="employee")
 
+    def serialize(self):
+        return {
+            "id": self.id,
+            "vards": self.vards,
+            "uzvards": self.uzvards,
+            "amats": self.amats,
+            "kods": self.kods,
+            "status": self.status
+        }
+
+
 
 class Shift(db.Model):
     __tablename__ = 'shifts'
@@ -72,6 +84,13 @@ class Order(db.Model):
    
     materials = db.relationship("OrderMaterial", backref="order")
 
+def to_dict(self):
+        return {
+            'id': self.id,
+            'nosaukums': self.nosaukums,
+            'daudzums': self.daudzums,
+            'status': self.status,
+        }
 
 
 class OrderMaterial(db.Model):
@@ -112,6 +131,22 @@ def token_required(f):
 
 
 # --- Routes ---
+@app.route("/api/stats/materials", methods=["GET"])
+def get_material_stats():
+    try:
+        results = db.session.query(
+            UsedMaterial.name,
+            db.func.sum(UsedMaterial.quantity).label("total")
+        ).group_by(UsedMaterial.name).all()
+
+        data = [{"name": name, "total": total} for name, total in results]
+        return jsonify(data), 200
+    except Exception as e:
+        print("Error:", e)
+        return jsonify({"error": "Neizdevās iegūt statistiku"}), 500
+
+
+
 @app.route("/login", methods=["POST"])
 def login():
     try:
@@ -500,37 +535,53 @@ def delete_material(current_user, material_id):
         logging.error(f"Error deleting material: {str(e)}")
         return jsonify({"error": "Failed to delete material", "details": str(e)}), 500
 # --- Run app ---
-
-
 @app.route('/orders', methods=['POST'])
-def create_order():
+@token_required
+def create_order(current_user):
     data = request.json
     try:
+        # Создаём заказ
         order = Order(
             nosaukums=data['nosaukums'],
             daudzums=data['daudzums'],
             status=data.get('status', 'Nav sākts')
         )
         db.session.add(order)
-        
-        for material in data['materials']:
-            db_material = Material.query.get(material['material_id'])
-            if db_material.daudzums < material['quantity']:
-                return jsonify({'error': f'Недостаточно {db_material.nosaukums}'}), 400
-                
+        db.session.flush()  # Получаем order.id до коммита
+
+        # Обработка материалов
+        materials = data.get('materials', [])
+        for material in materials:
+            material_id = material['material_id']
+            quantity = material['quantity']
+
+            db_material = Material.query.get(material_id)
+            if not db_material:
+                return jsonify({'error': f'Materiāls ar ID {material_id} nav atrasts'}), 404
+            if db_material.daudzums < quantity:
+                return jsonify({'error': f'Nepietiek materiāla: {db_material.nosaukums}'}), 400
+
             order_material = OrderMaterial(
                 order_id=order.id,
-                material_id=material['material_id'],
-                quantity=material['quantity']
+                material_id=material_id,
+                quantity=quantity
             )
             db.session.add(order_material)
-            db_material.daudzums -= material['quantity']
-        
+            db_material.daudzums -= quantity
+
         db.session.commit()
-        return jsonify(order.to_dict()), 201
+
+        return jsonify({
+            'id': order.id,
+            'nosaukums': order.nosaukums,
+            'daudzums': order.daudzums,
+            'status': order.status
+        }), 201
+
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
 
 @app.route("/orders/<int:order_id>", methods=["DELETE"])
 @token_required
@@ -632,5 +683,120 @@ def get_order_materials(order_id):
     
     return jsonify(result)
     
+@app.route('/api/work_stats', methods=['GET'])
+def get_work_stats():
+    try:
+        employees = Employee.query.options(joinedload(Employee.shifts)).all()
+        stats = []
+        for emp in employees:
+            total_seconds = sum(
+                (shift.end_time - shift.start_time).total_seconds()
+                for shift in emp.shifts
+                if shift.start_time and shift.end_time
+            )
+            stats.append({
+                "id": emp.id,
+                "hours": round(total_seconds / 3600, 2)
+            })
+        return jsonify(stats), 200
+    except Exception as e:
+        logging.error(f"Stats error: {str(e)}")
+        return jsonify({"error": "Stats generation failed"}), 500
+
+@app.route('/api/employees/stats', methods=['GET'])
+def get_employees_with_stats():
+    try:
+        employees = Employee.query.options(joinedload(Employee.shifts)).all()
+        result = []
+        for emp in employees:
+            total_seconds = sum(
+                (shift.end_time - shift.start_time).total_seconds()
+                for shift in emp.shifts
+                if shift.start_time and shift.end_time
+            )
+            result.append({
+                **emp.serialize(),
+                "hours": round(total_seconds / 3600, 2)
+            })
+        return jsonify(result), 200
+    except Exception as e:
+        logging.error(f"Employees stats error: {str(e)}")
+        return jsonify({"error": "Server error"}), 500
+        
+@app.route('/api/shifts/stats', methods=['GET', 'OPTIONS'])
+def get_shifts_stats():
+    if request.method == 'OPTIONS':
+        # Предоставить корректный CORS preflight ответ
+        response = jsonify({'message': 'CORS preflight'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Authorization, Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        return response, 200
+
+    try:
+        employees = Employee.query.options(joinedload(Employee.shifts)).all()
+        stats = []
+        for emp in employees:
+            total_seconds = sum(
+                (shift.end_time - shift.start_time).total_seconds()
+                for shift in emp.shifts
+                if shift.start_time and shift.end_time
+            )
+            stats.append({
+                "id": emp.id,
+                "vards": emp.vards,
+                "uzvards": emp.uzvards,
+                "amats": emp.amats,
+                "hours": round(total_seconds / 3600, 2)
+            })
+        response = jsonify(stats)
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response, 200
+    except Exception as e:
+        logging.error(f"Stats error: {str(e)}")
+        return jsonify({"error": "Stats generation failed"}), 500
+
+@app.route('/api/export_pdf', methods=['GET'])
+def export_pdf():
+    try:
+        employees = Employee.query.options(joinedload(Employee.shifts)).all()
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=A4)
+        width, height = A4
+        
+        # Header
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(50, height-50, "Employee Work Hours Report")
+        c.setFont("Helvetica", 12)
+        y = height - 80
+        
+        # Content
+        for emp in employees:
+            total_seconds = sum(
+                (shift.end_time - shift.start_time).total_seconds()
+                for shift in emp.shifts
+                if shift.start_time and shift_end_time
+            )
+            hours = round(total_seconds / 3600, 2)
+            line = f"{emp.vards} {emp.uzvards} ({emp.amats}): {hours} hours"
+            c.drawString(50, y, line)
+            y -= 20
+            if y < 50:
+                c.showPage()
+                y = height - 50
+                c.setFont("Helvetica", 12)
+        
+        c.save()
+        buffer.seek(0)
+        return send_file(
+            buffer,
+            as_attachment=True,
+            download_name="work_report.pdf",
+            mimetype="application/pdf"
+        )
+    except Exception as e:
+        logging.error(f"PDF error: {str(e)}")
+        return jsonify({"error": "PDF generation failed"}), 500
+
 if __name__ == "__main__":
     app.run(debug=True)

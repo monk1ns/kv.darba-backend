@@ -16,7 +16,8 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "http://localhost:3001"}}, supports_credentials=True)
 
 # PostgreSQL connection string
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:111@localhost:5432/kvdarbs'
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('SUPABASE_DATABASE_URI')
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
@@ -799,4 +800,5 @@ def export_pdf():
         return jsonify({"error": "PDF generation failed"}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=8000)
+

@@ -16,7 +16,11 @@ load_dotenv()
 app = Flask(__name__)
 
 # CORS setup for frontend on port 3000
-CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
+from flask_cors import CORS
+
+# CORS setup
+CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "https://api.render.com/deploy/srv-d0leb50gjchc73f0mn40?key=-w-tfX2mVbo"]}}, supports_credentials=True)
+
 
 # PostgreSQL connection string
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('SUPABASE_DATABASE_URI')

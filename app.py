@@ -1,3 +1,4 @@
+import os
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -8,12 +9,14 @@ import datetime
 from functools import wraps
 import bcrypt
 import logging
+from dotenv import load_dotenv
+load_dotenv()
 
 # Flask app setup
 app = Flask(__name__)
 
 # CORS setup for frontend on port 3000
-CORS(app, resources={r"/*": {"origins": "http://localhost:3001"}}, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
 
 # PostgreSQL connection string
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('SUPABASE_DATABASE_URI')
@@ -800,5 +803,5 @@ def export_pdf():
         return jsonify({"error": "PDF generation failed"}), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=3000)
+    app.run(debug=True)
 

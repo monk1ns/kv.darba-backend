@@ -13,27 +13,29 @@ import logging
 from dotenv import load_dotenv
 load_dotenv()
 
-
+# Flask app setup
 app = Flask(__name__)
 
-# Fix 1: Configure CORS properly with explicit headers
-CORS(app, 
-     origins=["*"],  # You might want to restrict this in production
-     supports_credentials=True,
-     allow_headers=["Content-Type", "Authorization"],
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-     expose_headers=["Content-Type", "Authorization"])
+# CORS setup for frontend on port 3000
+from flask_cors import CORS
 
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+# CORS setup
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
+
+# PostgreSQL connection string
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('SUPABASE_DATABASE_URI')
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-SECRET_KEY = os.getenv('SECRET_KEY', 'fallback_secret_key')
-
 db = SQLAlchemy(app)
 
+# JWT secret key
+SECRET_KEY = "your_secret_key"
+
+# Logging setup
 logging.basicConfig(level=logging.DEBUG)
 
-# Database models (unchanged)
+# --- Models ---
+
 class Employee(db.Model):
     __tablename__ = 'employees'
     id = db.Column(db.Integer, primary_key=True)
@@ -59,6 +61,7 @@ class Employee(db.Model):
         }
 
 
+
 class Shift(db.Model):
     __tablename__ = 'shifts'
     id = db.Column(db.Integer, primary_key=True)
@@ -82,6 +85,7 @@ class Material(db.Model):
     cascade="all, delete-orphan",
     passive_deletes=True
 )
+
 
 
 class Order(db.Model):
@@ -114,6 +118,8 @@ class OrderMaterial(db.Model):
 
     daudzums = db.Column(db.Integer)
 
+
+# --- Helper functions ---
 
 def generate_token(user_id):
     expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
@@ -172,21 +178,12 @@ def get_material_stats(current_user):
         return jsonify({"error": "Neizdevās iegūt statistiku"}), 500
 
 
-# Fix 2: Update login routes to handle CORS correctly
-@app.route("/login", methods=["POST", "OPTIONS"])
+
+@app.route("/login", methods=["POST"])
 def login():
-    # Fix 3: Manually handle OPTIONS requests with explicit headers
-    if request.method == "OPTIONS":
-        response = app.make_default_options_response()
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        response.headers.add('Access-Control-Allow-Origin', '*')  # In production, specify domains
-        return response
-        
     try:
         data = request.get_json()
-        logging.debug(f"Received login data: {data}")
+        print("Received data:", data)  # Логируем входящие данные
         if not data:
             return jsonify({"error": "No JSON body received"}), 400
 
@@ -202,8 +199,7 @@ def login():
         user.token = token
         db.session.commit()
 
-        # Fix 4: Create and configure response
-        response = jsonify({
+        return jsonify({
             "success": True,
             "message": "Pieteikšanās veiksmīga",
             "token": token,
@@ -214,28 +210,15 @@ def login():
                 "amats": user.amats
             },
             "redirect": "/admin" if user.amats == "Administrators" else "/home"
-        })
-        
-        # Add CORS headers to the response
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        return response, 200
+        }), 200
     except Exception as e:
-        logging.error(f"Error during login: {str(e)}")
+        print("Error during login:", str(e))
         return jsonify({"error": "Server error"}), 500
 
-
-@app.route("/login/password", methods=["POST", "OPTIONS"])
+@app.route("/login/password", methods=["POST"])
 def login_with_password():
-    # Fix 5: Handle OPTIONS request properly
-    if request.method == "OPTIONS":
-        response = app.make_default_options_response()
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        response.headers.add('Access-Control-Allow-Origin', '*')  # In production, specify domains
-        return response
-        
     try:
+        # Получение данных из запроса
         data = request.get_json()
         if not data:
             return jsonify({"error": "No JSON body received"}), 400
@@ -246,19 +229,21 @@ def login_with_password():
         if not kods or not password:
             return jsonify({"error": "Kods or password not provided"}), 400
 
+        # Поиск пользователя по коду
         user = Employee.query.filter_by(kods=kods).first()
         if not user:
             return jsonify({"error": "User not found"}), 404
 
+        # Проверка пароля с использованием bcrypt
         if not bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
             return jsonify({"error": "Incorrect password"}), 401
 
+        # Генерация токена для пользователя
         token = generate_token(user.id)
         user.token = token
         db.session.commit()
 
-        # Fix 6: Create and configure response
-        response = jsonify({
+        return jsonify({
             "success": True,
             "message": "Login successful",
             "token": token,
@@ -269,31 +254,10 @@ def login_with_password():
                 "amats": user.amats
             },
             "redirect": "/admin" if user.amats == "Administrators" else "/home"
-        })
-        
-        # Add CORS headers to the response
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        return response, 200
+        }), 200
 
     except Exception as e:
-        logging.error(f"Password login error: {str(e)}")
         return jsonify({"error": "Server error", "details": str(e)}), 500
-
-
-# Fix 7: Create a test route to verify CORS is working
-@app.route('/api/test-cors', methods=['GET', 'OPTIONS'])
-def test_cors():
-    if request.method == "OPTIONS":
-        response = app.make_default_options_response()
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        return response
-        
-    return jsonify({"message": "CORS is working!"}), 200
-
-
 
 @app.route("/logout", methods=["POST"])
 @token_required
@@ -382,12 +346,12 @@ def get_orders(current_user):
 @token_required
 def get_order_by_id(current_user, order_id):
     try:
-        
+        # Fetch the order by its ID
         order = Order.query.get(order_id)
         if not order:
             return jsonify({"error": "Pasūtījums nav atrasts"}), 404
         
-        
+        # Collect materials information associated with the order
         materials = []
         for order_material in order.materials:
             material_data = {
@@ -398,7 +362,7 @@ def get_order_by_id(current_user, order_id):
             }
             materials.append(material_data)
         
-        
+        # Prepare the response with order details
         response_data = {
             "id": order.id,
             "nosaukums": order.nosaukums,
@@ -441,7 +405,7 @@ def accept_order(current_user, order_id):
         if order.employee_id is not None:
             return jsonify({"error": "Pasūtījums jau ir piešķirts darbiniekam"}), 400
 
-        
+        # Проверка и списание материалов
         for order_material in order.materials:
             required_qty = order_material.daudzums * order.daudzums
             material = Material.query.get(order_material.material_id)
@@ -453,7 +417,7 @@ def accept_order(current_user, order_id):
 
             material.daudzums -= required_qty
 
-        
+        # Привязка сотрудника и обновление статуса
         order.employee_id = current_user.id
         order.status = "Pieņemts"
         db.session.commit()
@@ -485,7 +449,7 @@ def finish_order(current_user, order_id):
             return jsonify({"error": "Pasūtījums vēl nav pieņemts"}), 400
         if order.employee_id != current_user.id:
             return jsonify({"error": "Jūs nevarat pabeigt šo pasūtījumu, jo tas nav piešķirts Jums"}), 403
-        
+        # Изменить статус заказа на "Pabeigts"
         order.status = "Pabeigts"
         db.session.commit()
         return jsonify({
@@ -582,17 +546,17 @@ def update_order(current_user, order_id):
         order.daudzums = data.get("daudzums", order.daudzums)
         order.status = data.get("status", order.status)
 
-        
+        # Обновление материалов
         if "materials" in data:
-            
+            # Удалить старые материалы
             OrderMaterial.query.filter_by(order_id=order.id).delete()
 
-            
+            # Добавить новые материалы
             for mat in data["materials"]:
                 new_mat = OrderMaterial(
                     order_id=order.id,
                     material_id=mat["material_id"],
-                    daudzums=mat["daudzums"]
+                    daudzums=mat["quantity"]
                 )
                 db.session.add(new_mat)
 
@@ -632,7 +596,7 @@ def update_material(current_user, material_id):
         data = request.get_json()
         material.nosaukums = data.get('nosaukums', material.nosaukums)
         material.noliktava = data.get('noliktava', material.noliktava)
-        material.vieta = data.get('vieta', material.vieta)  
+        material.vieta = data.get('vieta', material.vieta)  # Обновление поля "vieta"
         material.vieniba = data.get('vieniba', material.vieniba)
         material.daudzums = data.get('daudzums', material.daudzums)
         db.session.commit()
@@ -654,22 +618,22 @@ def delete_material(current_user, material_id):
     except Exception as e:
         logging.error(f"Error deleting material: {str(e)}")
         return jsonify({"error": "Failed to delete material", "details": str(e)}), 500
-
+# --- Run app ---
 @app.route('/orders', methods=['POST'])
 @token_required
 def create_order(current_user):
     data = request.json
     try:
-        
+        # Создаём заказ
         order = Order(
             nosaukums=data['nosaukums'],
             daudzums=data['daudzums'],
             status=data.get('status', 'Nav sākts')
         )
         db.session.add(order)
-        db.session.flush()  
+        db.session.flush()  # Получаем order.id до коммита
 
-        
+        # Обработка материалов
         materials = data.get('materials', [])
         for material in materials:
             material_id = material['material_id']
@@ -725,20 +689,20 @@ def delete_order(current_user, order_id):
 @token_required
 def start_shift(current_user):
     try:
-        
+        # Проверяем наличие активной смены через end_time
         active_shift = Shift.query.filter(
             Shift.employee_id == current_user.id,
-            Shift.end_time.is_(None)  
+            Shift.end_time.is_(None)  # Активная смена = end_time не установлен
         ).first()
 
         if active_shift:
             return jsonify({"error": "Jums jau ir aktīva maiņa."}), 400
 
-        
+        # Создаем новую смену
         new_shift = Shift(
             employee_id=current_user.id,
-            start_time=datetime.datetime.utcnow(),  
-            end_time=None  
+            start_time=datetime.datetime.utcnow(),  # Используем текущее время
+            end_time=None  # Явно указываем отсутствие end_time
         )
         db.session.add(new_shift)
         db.session.commit()
@@ -767,7 +731,7 @@ def end_shift(current_user, shift_id):
         if shift.end_time is not None:
             return jsonify({"error": "Maiņa jau ir pabeigta."}), 400
 
-        
+        # Обновляем только end_time
         shift.end_time = datetime.datetime.utcnow()
         db.session.commit()
 
@@ -811,7 +775,7 @@ def get_order_materials(order_id):
 @app.route('/api/shifts/stats', methods=['GET', 'OPTIONS'])
 def get_shifts_stats():
     if request.method == 'OPTIONS':
-        
+        # Предоставить корректный CORS preflight ответ
         response = jsonify({'message': 'CORS preflight'})
         response.headers.add('Access-Control-Allow-Origin', '*')
         response.headers.add('Access-Control-Allow-Headers', 'Authorization, Content-Type')
@@ -850,13 +814,13 @@ def export_pdf():
         c = canvas.Canvas(buffer, pagesize=A4)
         width, height = A4
         
-        
+        # Header
         c.setFont("Helvetica-Bold", 16)
         c.drawString(50, height-50, "Employee Work Hours Report")
         c.setFont("Helvetica", 12)
         y = height - 80
         
-        
+        # Content
         for emp in employees:
             total_seconds = sum(
                 (shift.end_time - shift.start_time).total_seconds()
@@ -885,8 +849,5 @@ def export_pdf():
         return jsonify({"error": "PDF generation failed"}), 500
 
 if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
+    app.run(debug=True)
 

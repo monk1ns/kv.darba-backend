@@ -16,12 +16,13 @@ load_dotenv()
 
 app = Flask(__name__)
 
-
-from flask_cors import CORS
-
-CORS(app, origins="*", supports_credentials=True)
-
-
+# Fix 1: Configure CORS properly with explicit headers
+CORS(app, 
+     origins=["*"],  # You might want to restrict this in production
+     supports_credentials=True,
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+     expose_headers=["Content-Type", "Authorization"])
 
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -30,12 +31,9 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'fallback_secret_key')
 
 db = SQLAlchemy(app)
 
-
-
 logging.basicConfig(level=logging.DEBUG)
 
-
-
+# Database models (unchanged)
 class Employee(db.Model):
     __tablename__ = 'employees'
     id = db.Column(db.Integer, primary_key=True)
@@ -61,7 +59,6 @@ class Employee(db.Model):
         }
 
 
-
 class Shift(db.Model):
     __tablename__ = 'shifts'
     id = db.Column(db.Integer, primary_key=True)
@@ -85,7 +82,6 @@ class Material(db.Model):
     cascade="all, delete-orphan",
     passive_deletes=True
 )
-
 
 
 class Order(db.Model):
@@ -117,8 +113,6 @@ class OrderMaterial(db.Model):
 )
 
     daudzums = db.Column(db.Integer)
-
-
 
 
 def generate_token(user_id):
@@ -178,14 +172,21 @@ def get_material_stats(current_user):
         return jsonify({"error": "Neizdevās iegūt statistiku"}), 500
 
 
-
+# Fix 2: Update login routes to handle CORS correctly
 @app.route("/login", methods=["POST", "OPTIONS"])
 def login():
+    # Fix 3: Manually handle OPTIONS requests with explicit headers
     if request.method == "OPTIONS":
-        return '', 204
+        response = app.make_default_options_response()
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Origin', '*')  # In production, specify domains
+        return response
+        
     try:
         data = request.get_json()
-        print("Received data:", data)  
+        logging.debug(f"Received login data: {data}")
         if not data:
             return jsonify({"error": "No JSON body received"}), 400
 
@@ -201,7 +202,8 @@ def login():
         user.token = token
         db.session.commit()
 
-        return jsonify({
+        # Fix 4: Create and configure response
+        response = jsonify({
             "success": True,
             "message": "Pieteikšanās veiksmīga",
             "token": token,
@@ -212,15 +214,27 @@ def login():
                 "amats": user.amats
             },
             "redirect": "/admin" if user.amats == "Administrators" else "/home"
-        }), 200
+        })
+        
+        # Add CORS headers to the response
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response, 200
     except Exception as e:
-        print("Error during login:", str(e))
+        logging.error(f"Error during login: {str(e)}")
         return jsonify({"error": "Server error"}), 500
+
 
 @app.route("/login/password", methods=["POST", "OPTIONS"])
 def login_with_password():
+    # Fix 5: Handle OPTIONS request properly
     if request.method == "OPTIONS":
-        return '', 204
+        response = app.make_default_options_response()
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+        response.headers.add('Access-Control-Allow-Origin', '*')  # In production, specify domains
+        return response
+        
     try:
         data = request.get_json()
         if not data:
@@ -232,21 +246,19 @@ def login_with_password():
         if not kods or not password:
             return jsonify({"error": "Kods or password not provided"}), 400
 
-        
         user = Employee.query.filter_by(kods=kods).first()
         if not user:
             return jsonify({"error": "User not found"}), 404
 
-        
         if not bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
             return jsonify({"error": "Incorrect password"}), 401
 
-        
         token = generate_token(user.id)
         user.token = token
         db.session.commit()
 
-        return jsonify({
+        # Fix 6: Create and configure response
+        response = jsonify({
             "success": True,
             "message": "Login successful",
             "token": token,
@@ -257,10 +269,31 @@ def login_with_password():
                 "amats": user.amats
             },
             "redirect": "/admin" if user.amats == "Administrators" else "/home"
-        }), 200
+        })
+        
+        # Add CORS headers to the response
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response, 200
 
     except Exception as e:
+        logging.error(f"Password login error: {str(e)}")
         return jsonify({"error": "Server error", "details": str(e)}), 500
+
+
+# Fix 7: Create a test route to verify CORS is working
+@app.route('/api/test-cors', methods=['GET', 'OPTIONS'])
+def test_cors():
+    if request.method == "OPTIONS":
+        response = app.make_default_options_response()
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        return response
+        
+    return jsonify({"message": "CORS is working!"}), 200
+
+
 
 @app.route("/logout", methods=["POST"])
 @token_required

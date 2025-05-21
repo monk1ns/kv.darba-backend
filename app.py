@@ -20,7 +20,8 @@ app = Flask(__name__)
 from flask_cors import CORS
 
 
-CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "https://api.render.com/deploy/srv-d0leb50gjchc73f0mn40?key=-w-tfX2mVbo"]}}, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
 
 
 

@@ -179,8 +179,10 @@ def get_material_stats(current_user):
 
 
 
-@app.route("/login", methods=["POST"])
+@app.route("/login", methods=["POST", "OPTIONS"])
 def login():
+    if request.method == "OPTIONS":
+        return '', 204
     try:
         data = request.get_json()
         print("Received data:", data)  
@@ -215,10 +217,11 @@ def login():
         print("Error during login:", str(e))
         return jsonify({"error": "Server error"}), 500
 
-@app.route("/login/password", methods=["POST"])
+@app.route("/login/password", methods=["POST", "OPTIONS"])
 def login_with_password():
+    if request.method == "OPTIONS":
+        return '', 204
     try:
-        
         data = request.get_json()
         if not data:
             return jsonify({"error": "No JSON body received"}), 400

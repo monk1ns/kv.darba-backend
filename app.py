@@ -23,14 +23,13 @@ CORS(app, resources={r"/*": {"origins": ["http://localhost:3000"]}}, supports_cr
 
 
 
-
-
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://kv_darbs_user:rOyj5KbtauqnNydotS8Q9AlXmdNoLU0Y@dpg-d0mpp756ubrc73el4pbg-a/kv_darbs'
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+SECRET_KEY = os.getenv('SECRET_KEY', 'fallback_secret_key')
+
 db = SQLAlchemy(app)
 
-
-SECRET_KEY = "your_secret_key"
 
 
 logging.basicConfig(level=logging.DEBUG)

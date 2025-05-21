@@ -5,6 +5,7 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import joinedload
 import jwt
+from sqlalchemy import func
 import datetime
 from functools import wraps
 import bcrypt
@@ -12,29 +13,29 @@ import logging
 from dotenv import load_dotenv
 load_dotenv()
 
-# Flask app setup
+
 app = Flask(__name__)
 
-# CORS setup for frontend on port 3000
+
 from flask_cors import CORS
 
-# CORS setup
+
 CORS(app, resources={r"/*": {"origins": ["http://localhost:3000", "https://api.render.com/deploy/srv-d0leb50gjchc73f0mn40?key=-w-tfX2mVbo"]}}, supports_credentials=True)
 
 
-# PostgreSQL connection string
+
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('SUPABASE_DATABASE_URI')
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# JWT secret key
+
 SECRET_KEY = "your_secret_key"
 
-# Logging setup
+
 logging.basicConfig(level=logging.DEBUG)
 
-# --- Models ---
+
 
 class Employee(db.Model):
     __tablename__ = 'employees'
@@ -79,7 +80,13 @@ class Material(db.Model):
     vieniba = db.Column(db.String(20))
     daudzums = db.Column(db.INTEGER)
 
-    order_links = db.relationship("OrderMaterial", backref="material")
+    order_links = db.relationship(
+    "OrderMaterial",
+    backref="material",
+    cascade="all, delete-orphan",
+    passive_deletes=True
+)
+
 
 
 class Order(db.Model):
@@ -90,7 +97,7 @@ class Order(db.Model):
     employee_id = db.Column(db.Integer, db.ForeignKey('employees.id'), nullable=True)
     status = db.Column(db.String(20), default="Nav sākts")      
    
-    materials = db.relationship("OrderMaterial", backref="order")
+    materials = db.relationship("OrderMaterial", backref="order",  cascade="all, delete-orphan")
 
 def to_dict(self):
         return {
@@ -104,11 +111,16 @@ def to_dict(self):
 class OrderMaterial(db.Model):
     __tablename__ = 'order_materials'
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), primary_key=True)
-    material_id = db.Column(db.Integer, db.ForeignKey('materials.id'), primary_key=True)
+    material_id = db.Column(
+    db.Integer, 
+    db.ForeignKey('materials.id', ondelete='CASCADE'),
+    primary_key=True
+)
+
     daudzums = db.Column(db.Integer)
 
 
-# --- Helper functions ---
+
 
 def generate_token(user_id):
     expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=1)
@@ -138,19 +150,32 @@ def token_required(f):
     return decorator
 
 
-# --- Routes ---
 @app.route("/api/stats/materials", methods=["GET"])
-def get_material_stats():
+@token_required
+def get_material_stats(current_user):
     try:
         results = db.session.query(
-            UsedMaterial.name,
-            db.func.sum(UsedMaterial.quantity).label("total")
-        ).group_by(UsedMaterial.name).all()
+            Material.id,
+            Material.nosaukums,
+            db.func.sum(OrderMaterial.daudzums * Order.daudzums).label("total")
+        ).join(OrderMaterial, Material.id == OrderMaterial.material_id) \
+         .join(Order, Order.id == OrderMaterial.order_id) \
+         .group_by(Material.id, Material.nosaukums) \
+         .all()
 
-        data = [{"name": name, "total": total} for name, total in results]
+        data = [
+            {
+                "id": material_id,
+                "nosaukums": nosaukums,
+                "totalUsed": float(total) if total is not None else 0
+            }
+            for material_id, nosaukums, total in results
+        ]
+
         return jsonify(data), 200
+
     except Exception as e:
-        print("Error:", e)
+        logging.error(f"Stats error: {str(e)}")
         return jsonify({"error": "Neizdevās iegūt statistiku"}), 500
 
 
@@ -159,7 +184,7 @@ def get_material_stats():
 def login():
     try:
         data = request.get_json()
-        print("Received data:", data)  # Логируем входящие данные
+        print("Received data:", data)  
         if not data:
             return jsonify({"error": "No JSON body received"}), 400
 
@@ -185,7 +210,7 @@ def login():
                 "uzvards": user.uzvards,
                 "amats": user.amats
             },
-            "redirect": "/adminpanel" if user.amats == "Administrators" else "/home"
+            "redirect": "/admin" if user.amats == "Administrators" else "/home"
         }), 200
     except Exception as e:
         print("Error during login:", str(e))
@@ -194,7 +219,7 @@ def login():
 @app.route("/login/password", methods=["POST"])
 def login_with_password():
     try:
-        # Получение данных из запроса
+        
         data = request.get_json()
         if not data:
             return jsonify({"error": "No JSON body received"}), 400
@@ -205,16 +230,16 @@ def login_with_password():
         if not kods or not password:
             return jsonify({"error": "Kods or password not provided"}), 400
 
-        # Поиск пользователя по коду
+        
         user = Employee.query.filter_by(kods=kods).first()
         if not user:
             return jsonify({"error": "User not found"}), 404
 
-        # Проверка пароля с использованием bcrypt
+        
         if not bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
             return jsonify({"error": "Incorrect password"}), 401
 
-        # Генерация токена для пользователя
+        
         token = generate_token(user.id)
         user.token = token
         db.session.commit()
@@ -229,7 +254,7 @@ def login_with_password():
                 "uzvards": user.uzvards,
                 "amats": user.amats
             },
-            "redirect": "/adminpanel" if user.amats == "Administrators" else "/home"
+            "redirect": "/admin" if user.amats == "Administrators" else "/home"
         }), 200
 
     except Exception as e:
@@ -298,6 +323,15 @@ def get_orders(current_user):
                 "nosaukums": order.nosaukums,
                 "daudzums": order.daudzums,
                 "status": order.status,
+                "materials": [
+                    {
+                        "material_id": m.material_id,
+                        "daudzums": m.daudzums,
+                        "material_name": m.material.nosaukums,
+                        "vieniba": m.material.vieniba
+                    }
+                    for m in order.materials
+                ],
                 "employee": {
                     "vards": order.employee.vards,
                     "uzvards": order.employee.uzvards
@@ -313,27 +347,38 @@ def get_orders(current_user):
 @token_required
 def get_order_by_id(current_user, order_id):
     try:
-        # Fetch the order by its ID
+        
         order = Order.query.get(order_id)
         if not order:
             return jsonify({"error": "Pasūtījums nav atrasts"}), 404
         
-        # Collect materials information associated with the order
+        
         materials = []
         for order_material in order.materials:
             material_data = {
+                "material_id": order_material.material.id,
                 "material_name": order_material.material.nosaukums,
                 "quantity": order_material.daudzums,
-                
+   
             }
             materials.append(material_data)
         
-        # Prepare the response with order details
+        
         response_data = {
             "id": order.id,
             "nosaukums": order.nosaukums,
             "daudzums": order.daudzums,
             "status": order.status,
+                "materials": [
+                    {
+                        "material_id": m.material_id,
+                        "daudzums": m.daudzums,
+                        "material_name": m.material.nosaukums,
+                        "vieniba": m.material.vieniba
+                    }
+                    for m in order.materials
+                ],
+
             "employee": {
                     "id": order.employee.id if order.employee else None,
                     "vards": order.employee.vards if order.employee else None,
@@ -361,7 +406,7 @@ def accept_order(current_user, order_id):
         if order.employee_id is not None:
             return jsonify({"error": "Pasūtījums jau ir piešķirts darbiniekam"}), 400
 
-        # Проверка и списание материалов
+        
         for order_material in order.materials:
             required_qty = order_material.daudzums * order.daudzums
             material = Material.query.get(order_material.material_id)
@@ -373,7 +418,7 @@ def accept_order(current_user, order_id):
 
             material.daudzums -= required_qty
 
-        # Привязка сотрудника и обновление статуса
+        
         order.employee_id = current_user.id
         order.status = "Pieņemts"
         db.session.commit()
@@ -405,7 +450,7 @@ def finish_order(current_user, order_id):
             return jsonify({"error": "Pasūtījums vēl nav pieņemts"}), 400
         if order.employee_id != current_user.id:
             return jsonify({"error": "Jūs nevarat pabeigt šo pasūtījumu, jo tas nav piešķirts Jums"}), 403
-        # Изменить статус заказа на "Pabeigts"
+        
         order.status = "Pabeigts"
         db.session.commit()
         return jsonify({
@@ -488,8 +533,40 @@ def delete_employee(current_user, id):
         return jsonify({"success": True, "message": "Darbinieks dzēsts"}), 200
     except Exception as e:
         return jsonify({"error": "Failed to delete employee", "details": str(e)}), 500
+@app.route("/orders/<int:order_id>", methods=["PUT"])
+@token_required
+def update_order(current_user, order_id):
+    try:
+        order = Order.query.get(order_id)
+        if not order:
+            return jsonify({"error": "Pasūtījums nav atrasts"}), 404
 
+        data = request.get_json()
 
+        order.nosaukums = data.get("nosaukums", order.nosaukums)
+        order.daudzums = data.get("daudzums", order.daudzums)
+        order.status = data.get("status", order.status)
+
+        
+        if "materials" in data:
+            
+            OrderMaterial.query.filter_by(order_id=order.id).delete()
+
+            
+            for mat in data["materials"]:
+                new_mat = OrderMaterial(
+                    order_id=order.id,
+                    material_id=mat["material_id"],
+                    daudzums=mat["daudzums"]
+                )
+                db.session.add(new_mat)
+
+        db.session.commit()
+        return jsonify({"success": True, "message": "Pasūtījums atjaunināts"}), 200
+
+    except Exception as e:
+        logging.error(f"Update order error: {str(e)}")
+        return jsonify({"error": "Neizdevās atjaunināt pasūtījumu", "details": str(e)}), 500
 
 @app.route("/materials", methods=["POST"])
 @token_required
@@ -520,7 +597,7 @@ def update_material(current_user, material_id):
         data = request.get_json()
         material.nosaukums = data.get('nosaukums', material.nosaukums)
         material.noliktava = data.get('noliktava', material.noliktava)
-        material.vieta = data.get('vieta', material.vieta)  # Обновление поля "vieta"
+        material.vieta = data.get('vieta', material.vieta)  
         material.vieniba = data.get('vieniba', material.vieniba)
         material.daudzums = data.get('daudzums', material.daudzums)
         db.session.commit()
@@ -542,22 +619,22 @@ def delete_material(current_user, material_id):
     except Exception as e:
         logging.error(f"Error deleting material: {str(e)}")
         return jsonify({"error": "Failed to delete material", "details": str(e)}), 500
-# --- Run app ---
+
 @app.route('/orders', methods=['POST'])
 @token_required
 def create_order(current_user):
     data = request.json
     try:
-        # Создаём заказ
+        
         order = Order(
             nosaukums=data['nosaukums'],
             daudzums=data['daudzums'],
             status=data.get('status', 'Nav sākts')
         )
         db.session.add(order)
-        db.session.flush()  # Получаем order.id до коммита
+        db.session.flush()  
 
-        # Обработка материалов
+        
         materials = data.get('materials', [])
         for material in materials:
             material_id = material['material_id']
@@ -567,12 +644,16 @@ def create_order(current_user):
             if not db_material:
                 return jsonify({'error': f'Materiāls ar ID {material_id} nav atrasts'}), 404
             if db_material.daudzums < quantity:
-                return jsonify({'error': f'Nepietiek materiāla: {db_material.nosaukums}'}), 400
+                return jsonify({
+                'error': f'Nepietiek materiāla: {db_material.nosaukums}. Nepieciešams: {quantity}, pieejams: {db_material.daudzums}'
+            }), 400
+
+
 
             order_material = OrderMaterial(
                 order_id=order.id,
                 material_id=material_id,
-                quantity=quantity
+                daudzums=quantity
             )
             db.session.add(order_material)
             db_material.daudzums -= quantity
@@ -609,20 +690,20 @@ def delete_order(current_user, order_id):
 @token_required
 def start_shift(current_user):
     try:
-        # Проверяем наличие активной смены через end_time
+        
         active_shift = Shift.query.filter(
             Shift.employee_id == current_user.id,
-            Shift.end_time.is_(None)  # Активная смена = end_time не установлен
+            Shift.end_time.is_(None)  
         ).first()
 
         if active_shift:
             return jsonify({"error": "Jums jau ir aktīva maiņa."}), 400
 
-        # Создаем новую смену
+        
         new_shift = Shift(
             employee_id=current_user.id,
-            start_time=datetime.datetime.utcnow(),  # Используем текущее время
-            end_time=None  # Явно указываем отсутствие end_time
+            start_time=datetime.datetime.utcnow(),  
+            end_time=None  
         )
         db.session.add(new_shift)
         db.session.commit()
@@ -651,7 +732,7 @@ def end_shift(current_user, shift_id):
         if shift.end_time is not None:
             return jsonify({"error": "Maiņa jau ir pabeigta."}), 400
 
-        # Обновляем только end_time
+        
         shift.end_time = datetime.datetime.utcnow()
         db.session.commit()
 
@@ -690,51 +771,12 @@ def get_order_materials(order_id):
     } for m in materials]
     
     return jsonify(result)
-    
-@app.route('/api/work_stats', methods=['GET'])
-def get_work_stats():
-    try:
-        employees = Employee.query.options(joinedload(Employee.shifts)).all()
-        stats = []
-        for emp in employees:
-            total_seconds = sum(
-                (shift.end_time - shift.start_time).total_seconds()
-                for shift in emp.shifts
-                if shift.start_time and shift.end_time
-            )
-            stats.append({
-                "id": emp.id,
-                "hours": round(total_seconds / 3600, 2)
-            })
-        return jsonify(stats), 200
-    except Exception as e:
-        logging.error(f"Stats error: {str(e)}")
-        return jsonify({"error": "Stats generation failed"}), 500
+  
 
-@app.route('/api/employees/stats', methods=['GET'])
-def get_employees_with_stats():
-    try:
-        employees = Employee.query.options(joinedload(Employee.shifts)).all()
-        result = []
-        for emp in employees:
-            total_seconds = sum(
-                (shift.end_time - shift.start_time).total_seconds()
-                for shift in emp.shifts
-                if shift.start_time and shift.end_time
-            )
-            result.append({
-                **emp.serialize(),
-                "hours": round(total_seconds / 3600, 2)
-            })
-        return jsonify(result), 200
-    except Exception as e:
-        logging.error(f"Employees stats error: {str(e)}")
-        return jsonify({"error": "Server error"}), 500
-        
 @app.route('/api/shifts/stats', methods=['GET', 'OPTIONS'])
 def get_shifts_stats():
     if request.method == 'OPTIONS':
-        # Предоставить корректный CORS preflight ответ
+        
         response = jsonify({'message': 'CORS preflight'})
         response.headers.add('Access-Control-Allow-Origin', '*')
         response.headers.add('Access-Control-Allow-Headers', 'Authorization, Content-Type')
@@ -756,6 +798,7 @@ def get_shifts_stats():
                 "uzvards": emp.uzvards,
                 "amats": emp.amats,
                 "hours": round(total_seconds / 3600, 2)
+
             })
         response = jsonify(stats)
         response.headers.add('Access-Control-Allow-Origin', '*')
@@ -772,13 +815,13 @@ def export_pdf():
         c = canvas.Canvas(buffer, pagesize=A4)
         width, height = A4
         
-        # Header
+        
         c.setFont("Helvetica-Bold", 16)
         c.drawString(50, height-50, "Employee Work Hours Report")
         c.setFont("Helvetica", 12)
         y = height - 80
         
-        # Content
+        
         for emp in employees:
             total_seconds = sum(
                 (shift.end_time - shift.start_time).total_seconds()
